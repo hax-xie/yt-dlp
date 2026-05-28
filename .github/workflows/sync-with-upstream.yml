@@ -1,0 +1,59 @@
+name: Sync with Upstream
+on:
+  schedule:
+    - cron: '0 3 * * *'   # UTC 03:00 = 北京时间 11:00
+  workflow_dispatch:       # 允许手动触发
+
+concurrency:
+  group: ${{ github.repository }}-sync
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          fetch-depth: 0
+
+      - name: Detect upstream
+        id: upstream
+        run: |
+          PARENT=$(curl -s -H "Authorization: token ${{ github.token }}" \
+            https://api.github.com/repos/${{ github.repository }} | jq -r '.parent.full_name // empty')
+          if [ -z "$PARENT" ]; then
+            echo "No parent - not a fork"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "parent=$PARENT" >> $GITHUB_OUTPUT
+            echo "skip=false" >> $GITHUB_OUTPUT
+            git remote add upstream https://github.com/$PARENT.git || true
+          fi
+
+      - name: Fetch upstream
+        if: steps.upstream.outputs.skip != 'true'
+        run: git fetch upstream
+
+      - name: Check if behind
+        id: check
+        if: steps.upstream.outputs.skip != 'true'
+        run: |
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main 2>/dev/null || git rev-parse upstream/master 2>/dev/null)
+          if [ "$LOCAL" != "$UPSTREAM" ]; then
+            echo "behind=true" >> $GITHUB_OUTPUT
+          else
+            echo "behind=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Merge & push
+        if: steps.check.outputs.behind == 'true'
+        run: |
+          git merge upstream/main --no-edit || git merge upstream/master --no-edit || true
+          git push origin HEAD || true
